@@ -11,11 +11,11 @@ pub struct RowData {
 
 pub struct SheetSession {
     pub total_rows: i64,
-    pub total_cols: i64, // NEW: We track columns too
+    pub total_cols: i64,
 }
 
 impl SheetSession {
-    #[frb(sync)]
+    // REMOVED #[frb(sync)] -- Now runs on background thread
     pub fn new_demo(rows: i64, cols: i64) -> SheetSession {
         SheetSession {
             total_rows: rows,
@@ -23,8 +23,7 @@ impl SheetSession {
         }
     }
 
-    // NEW: Generate headers dynamically for the requested range (e.g., Col 0="A", Col 26="AA")
-    #[frb(sync)]
+    // REMOVED #[frb(sync)] -- Now returns Future<Vec<String>> in Dart
     pub fn get_header_chunk(&self, col_start: i64, col_count: i32) -> Vec<String> {
         let mut headers = Vec::new();
         for i in 0..col_count {
@@ -35,7 +34,7 @@ impl SheetSession {
         headers
     }
 
-    // NEW: We now need a 2D Slice: Which Rows? AND Which Cols?
+    // REMOVED #[frb(sync)] -- Already efficient, but now won't block UI
     pub fn get_grid_chunk(
         &self, 
         row_start: i64, 
@@ -50,13 +49,10 @@ impl SheetSession {
             if current_row_idx >= self.total_rows { break; }
 
             let mut cells = Vec::new();
-            
-            // Iterate only through the VISIBLE columns
             for c in 0..col_count {
                 let current_col_idx = col_start + (c as i64);
                 if current_col_idx >= self.total_cols { break; }
 
-                // Generate fake data based on X and Y coords
                 let content = format!("{},{}", 
                     Self::number_to_col_name(current_col_idx), 
                     current_row_idx
@@ -73,7 +69,6 @@ impl SheetSession {
         results
     }
 
-    // Helper: 0 -> A, 25 -> Z, 26 -> AA
     fn number_to_col_name(mut n: i64) -> String {
         let mut result = String::new();
         loop {
