@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:turbosheet/src/rust/api/simple.dart';
 import 'package:turbosheet/src/rust/frb_generated.dart';
 
-
 Future<void> main() async {
   await RustLib.init();
   runApp(const MyApp());
@@ -36,9 +35,19 @@ class _SpreadsheetLoaderState extends State<SpreadsheetLoader> {
   @override
   void initState() {
     super.initState();
-    // NEW: No Future.value() wrapper needed. newDemo is now async native.
-    _sessionFuture = SheetSession.newDemo(rows: 1000000000, cols: 1000000000);
+    _sessionFuture = _loadSheet();
   }
+
+  Future<SheetSession> _loadSheet() async {
+    // -------------------------------------------------------------
+    // IMPORTANT: Make sure this file exists on your computer!
+    // -------------------------------------------------------------
+    const String filePath = "/home/venkat/Downloads/data.csv"; 
+    
+    // Call the Rust function to memory-map the file
+    return await SheetSession.newFromFile(path: filePath);
+  }
+
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<SheetSession>(
@@ -47,9 +56,34 @@ class _SpreadsheetLoaderState extends State<SpreadsheetLoader> {
         if (snapshot.hasData) {
           return TurboViewer(session: snapshot.data!);
         } else if (snapshot.hasError) {
-          return Scaffold(body: Center(child: Text("Error: ${snapshot.error}")));
+          return Scaffold(
+            body: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(20.0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.error_outline, color: Colors.red, size: 40),
+                    const SizedBox(height: 10),
+                    Text("Error loading file:\n${snapshot.error}", textAlign: TextAlign.center),
+                  ],
+                ),
+              ),
+            ),
+          );
         }
-        return const Scaffold(body: Center(child: CircularProgressIndicator()));
+        return const Scaffold(
+          body: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 20),
+                Text("Indexing file..."),
+              ],
+            ),
+          ),
+        );
       },
     );
   }
@@ -64,58 +98,42 @@ class TurboViewer extends StatefulWidget {
 }
 
 class _TurboViewerState extends State<TurboViewer> {
-  // State for data
   final Map<int, RowData> _rowCache = {};
   final Set<int> _loadingPages = {};
   
-  // Configuration
   final int _rowsPerPage = 60;
-  final int _visibleCols = 6; // How many cols to show on screen at once
+  final int _visibleCols = 6; 
   
-  // Navigation State
   int _currentColStart = 0;
   
-  // Controllers
   final ScrollController _verticalController = ScrollController();
-  final TextEditingController _jumpController = TextEditingController();
-
-  // Dynamic Headers
   List<String> _currentHeaders = [];
 
   @override
-  @override
   void initState() {
     super.initState();
-    // Fire the request. The UI will update when data arrives.
     _refreshHeaders();
   }
 
-  // NEW: Marked as async
-  // NEW: Marked as async so we can await the Rust result
   Future<void> _refreshHeaders() async {
-    // 1. Capture current horizontal position to prevent race conditions
-    // (If the user scrolls fast, we only want the latest result)
     final requestedColStart = _currentColStart;
     
-    // 2. Await the Rust result
-    // This used to be synchronous, now it's a Future!
+    // Async call to Rust
     final newHeaders = await widget.session.getHeaderChunk(
       colStart: _currentColStart, 
       colCount: _visibleCols
     );
 
-    // 3. Safety Check: If the widget was closed or the user scrolled away 
-    // while we were waiting, discard this old data.
     if (!mounted || _currentColStart != requestedColStart) return;
 
     setState(() {
       _currentHeaders = newHeaders;
     });
 
-    // Invalidate row cache because columns have changed
     _rowCache.clear(); 
     _loadingPages.clear();
   }
+
   void _fetchPageIfNeeded(int rowIndex) {
     final int pageIndex = rowIndex ~/ _rowsPerPage;
     if (_loadingPages.contains(pageIndex)) return;
@@ -125,11 +143,10 @@ class _TurboViewerState extends State<TurboViewer> {
 
     Future.microtask(() async {
       try {
-        // Ask Rust for a 2D Chunk
         final newRows = await widget.session.getGridChunk(
           rowStart: startRow, 
           rowCount: _rowsPerPage,
-          colStart: _currentColStart, // Current Horizontal Position
+          colStart: _currentColStart, 
           colCount: _visibleCols
         );
 
@@ -146,13 +163,14 @@ class _TurboViewerState extends State<TurboViewer> {
       }
     });
   }
-void _scrollHorizontal(int delta) {
+
+  void _scrollHorizontal(int delta) {
     int newStart = _currentColStart + delta;
-
-    // FIX: Calculate strict maximum limit
+    
+    // FIX: Ensure maxStart is never negative (prevents crash on small files)
     int maxStart = (widget.session.totalCols - _visibleCols).toInt();
+    if (maxStart < 0) maxStart = 0;
 
-    // FIX: Clamp safely between 0 and maxStart
     if (newStart < 0) newStart = 0;
     if (newStart > maxStart) newStart = maxStart;
 
@@ -161,13 +179,13 @@ void _scrollHorizontal(int delta) {
       _refreshHeaders();
     }
   }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: Text("Grid: ${widget.session.totalRows}R x ${widget.session.totalCols}C"),
         actions: [
-           // Quick Navigation for Columns
            IconButton(
             icon: const Icon(Icons.arrow_back_ios),
             onPressed: () => _scrollHorizontal(-1),
@@ -201,7 +219,6 @@ void _scrollHorizontal(int delta) {
               },
             ),
           ),
-          // Horizontal Scrollbar simulation
           _buildHorizontalControl(),
         ],
       ),
@@ -209,6 +226,10 @@ void _scrollHorizontal(int delta) {
   }
 
   Widget _buildHorizontalControl() {
+    // FIX: Calculate a safe maximum value that is at least 0.0
+    final double maxVal = (widget.session.totalCols - _visibleCols).toDouble();
+    final double safeMax = maxVal < 0 ? 0.0 : maxVal;
+
     return Container(
       color: Colors.black45,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -217,16 +238,11 @@ void _scrollHorizontal(int delta) {
           const Text("Horizontal Pos: "),
           Expanded(
             child: Slider(
-              // FIX: Clamp the value to ensure it never exceeds max, preventing the crash
-              value: _currentColStart.toDouble().clamp(
-                0.0,
-                (widget.session.totalCols - _visibleCols).toDouble(),
-              ),
+              // FIX: Clamp value to 0..safeMax range
+              value: _currentColStart.toDouble().clamp(0.0, safeMax),
               min: 0,
-              // FIX: Ensure max matches the logic in _scrollHorizontal
-              max: (widget.session.totalCols - _visibleCols).toDouble(),
+              max: safeMax,
               onChanged: (val) {
-                // Debouncing should be added here for production
                 if ((val - _currentColStart).abs() > 5) {
                    setState(() {
                     _currentColStart = val.toInt();
@@ -295,60 +311,60 @@ void _scrollHorizontal(int delta) {
       child: Text("Loading Row $index...", style: const TextStyle(fontSize: 10, color: Colors.white24)),
     );
   }
-void _showJumpDialog() {
-  TextEditingController rowController = TextEditingController();
-  TextEditingController colController = TextEditingController();
 
-  showDialog(
-    context: context,
-    builder: (context) => AlertDialog(
-      title: const Text("Jump to Coords"),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: rowController,
-            keyboardType: TextInputType.number,
-            decoration: const InputDecoration(labelText: "Row Index"),
-          ),
-          const SizedBox(height: 10),
-          TextField(
-            controller: colController,
-            keyboardType: TextInputType.number,
-            decoration: const InputDecoration(labelText: "Column Index"),
+  void _showJumpDialog() {
+    TextEditingController rowController = TextEditingController();
+    TextEditingController colController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Jump to Coords"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: rowController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: "Row Index"),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: colController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: "Column Index"),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              final int? rIndex = int.tryParse(rowController.text);
+              final int? cIndex = int.tryParse(colController.text);
+              
+              if (rIndex != null) {
+                _verticalController.jumpTo(rIndex * 40.0);
+              }
+              if (cIndex != null) {
+                // FIX: Use 0 as the floor for maxStart
+                int maxStart = (widget.session.totalCols - _visibleCols).toInt();
+                if (maxStart < 0) maxStart = 0;
+
+                int safeCol = cIndex;
+                if (safeCol > maxStart) safeCol = maxStart;
+                if (safeCol < 0) safeCol = 0;
+
+                setState(() {
+                  _currentColStart = safeCol;
+                  _refreshHeaders();
+                });
+              }
+              Navigator.pop(context);
+            },
+            child: const Text("Go"),
           ),
         ],
       ),
-      actions: [
-        TextButton(
-          onPressed: () {
-            final int? rIndex = int.tryParse(rowController.text);
-            final int? cIndex = int.tryParse(colController.text);
-            
-            if (rIndex != null) {
-              _verticalController.jumpTo(rIndex * 40.0);
-            }
-            if (cIndex != null) {
-              // FIX: Clamp manual input so users can't type "1000000000" and crash it
-              int maxStart = (widget.session.totalCols - _visibleCols).toInt();
-              int safeCol = cIndex;
-              
-              if (safeCol > maxStart) safeCol = maxStart;
-              if (safeCol < 0) safeCol = 0;
-
-              setState(() {
-                _currentColStart = safeCol;
-                _refreshHeaders();
-              });
-            }
-            
-            Navigator.pop(context);
-          },
-          child: const Text("Go"),
-        ),
-      ],
-    ),
-  );
-}
-  
+    );
+  }
 }
