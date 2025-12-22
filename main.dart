@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:my_app/src/rust/api/simple.dart';
-import 'package:my_app/src/rust/frb_generated.dart';
+import 'package:turbosheet/src/rust/api/simple.dart';
+import 'package:turbosheet/src/rust/frb_generated.dart';
+
 
 Future<void> main() async {
   await RustLib.init();
@@ -35,10 +36,9 @@ class _SpreadsheetLoaderState extends State<SpreadsheetLoader> {
   @override
   void initState() {
     super.initState();
-    // 1 Billion Rows, 1 Billion Columns
-    _sessionFuture = Future.value(SheetSession.newDemo(rows: 1000000000, cols: 1000000000));
+    // NEW: No Future.value() wrapper needed. newDemo is now async native.
+    _sessionFuture = SheetSession.newDemo(rows: 1000000000, cols: 1000000000);
   }
-
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<SheetSession>(
@@ -83,25 +83,39 @@ class _TurboViewerState extends State<TurboViewer> {
   List<String> _currentHeaders = [];
 
   @override
+  @override
   void initState() {
     super.initState();
+    // Fire the request. The UI will update when data arrives.
     _refreshHeaders();
   }
 
-  void _refreshHeaders() {
-    // Ask Rust for headers for the CURRENT horizontal window
+  // NEW: Marked as async
+  // NEW: Marked as async so we can await the Rust result
+  Future<void> _refreshHeaders() async {
+    // 1. Capture current horizontal position to prevent race conditions
+    // (If the user scrolls fast, we only want the latest result)
+    final requestedColStart = _currentColStart;
+    
+    // 2. Await the Rust result
+    // This used to be synchronous, now it's a Future!
+    final newHeaders = await widget.session.getHeaderChunk(
+      colStart: _currentColStart, 
+      colCount: _visibleCols
+    );
+
+    // 3. Safety Check: If the widget was closed or the user scrolled away 
+    // while we were waiting, discard this old data.
+    if (!mounted || _currentColStart != requestedColStart) return;
+
     setState(() {
-      _currentHeaders = widget.session.getHeaderChunk(
-        colStart: _currentColStart, 
-        colCount: _visibleCols
-      );
+      _currentHeaders = newHeaders;
     });
-    // When we scroll horizontally, we must invalidate row cache because 
-    // the columns inside the rows have changed!
+
+    // Invalidate row cache because columns have changed
     _rowCache.clear(); 
     _loadingPages.clear();
   }
-
   void _fetchPageIfNeeded(int rowIndex) {
     final int pageIndex = rowIndex ~/ _rowsPerPage;
     if (_loadingPages.contains(pageIndex)) return;
@@ -132,18 +146,21 @@ class _TurboViewerState extends State<TurboViewer> {
       }
     });
   }
-
-  void _scrollHorizontal(int delta) {
+void _scrollHorizontal(int delta) {
     int newStart = _currentColStart + delta;
+
+    // FIX: Calculate strict maximum limit
+    int maxStart = (widget.session.totalCols - _visibleCols).toInt();
+
+    // FIX: Clamp safely between 0 and maxStart
     if (newStart < 0) newStart = 0;
-    if (newStart >= widget.session.totalCols) return;
+    if (newStart > maxStart) newStart = maxStart;
 
     if (newStart != _currentColStart) {
       _currentColStart = newStart;
       _refreshHeaders();
     }
   }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -200,8 +217,13 @@ class _TurboViewerState extends State<TurboViewer> {
           const Text("Horizontal Pos: "),
           Expanded(
             child: Slider(
-              value: _currentColStart.toDouble(),
+              // FIX: Clamp the value to ensure it never exceeds max, preventing the crash
+              value: _currentColStart.toDouble().clamp(
+                0.0,
+                (widget.session.totalCols - _visibleCols).toDouble(),
+              ),
               min: 0,
+              // FIX: Ensure max matches the logic in _scrollHorizontal
               max: (widget.session.totalCols - _visibleCols).toDouble(),
               onChanged: (val) {
                 // Debouncing should be added here for production
@@ -307,8 +329,15 @@ void _showJumpDialog() {
               _verticalController.jumpTo(rIndex * 40.0);
             }
             if (cIndex != null) {
+              // FIX: Clamp manual input so users can't type "1000000000" and crash it
+              int maxStart = (widget.session.totalCols - _visibleCols).toInt();
+              int safeCol = cIndex;
+              
+              if (safeCol > maxStart) safeCol = maxStart;
+              if (safeCol < 0) safeCol = 0;
+
               setState(() {
-                _currentColStart = cIndex;
+                _currentColStart = safeCol;
                 _refreshHeaders();
               });
             }
